@@ -2,8 +2,9 @@
  * --------------------------------
  * Infinite Scroll
  * --------------------------------
+ * + modified by Spring MC
  * + https://github.com/paulirish/infinite-scroll
- * + version 2.0b2.120519
+ * + version 3.0
  * + Copyright 2011/12 Paul Irish & Luke Shumard
  * + Licensed under the MIT license
  * + Documentation: http://infinite-scroll.com/
@@ -11,11 +12,18 @@
 
 (function (window, $, undefined) {
 
-$.infinitescroll = function infscr(options, callback, element) {
+$.infinitescroll = function(options, callback, element) {
     this.element = $(element);
 
     // Flag the object in the event of a failed creation
-    if (!this._create(options, callback)) {
+    this.failed = false;
+    if (this._create(options, callback)) {
+        // hide default pagination element if exists
+        var $nav = $(options.navSelector);
+        if ($nav.size() > 0) {
+            $nav.hide();
+        }
+    } else {
         this.failed = true;
     }
 };
@@ -36,199 +44,278 @@ $.infinitescroll.defaults = {
         isDuringAjax: false,
         isPaused: false,
         isDone: false, // For when it goes all the way through the archive.
-        isInvalidPage: false,
         isDestroyed: false,
+        isInvalidPage: false,
         currPage: 1
     },
     infid: 0, //Instance ID
     binder: $(window), // used to cache the selector
     callback: undefined,
     behavior: undefined,
+    forceCreate: false,
+    fragSelector: null,
     itemSelector: "div.post",
     navSelector: "div.navigation",
     nextSelector: "div.navigation a:first",
-    contentSelector: null, // rename to pageFragment
     animate: false,
     dataType: 'html',
-    appendCallback: true,
-    errorCallback: function () { },
+    autoAppended: true,
+    errorCallback: $.noop,
     bufferPx: 40,
+    distancePx: undefined,
     extraScrollPx: 150,
-    pixelsFromNavToBottom: undefined,
     path: undefined,
-    pathParse: undefined,
+    pathParser: undefined,
     debug: false
 };
 
 
 $.infinitescroll.prototype = {
 
-    Version: '2.1',
-
-    /*
-     * ----------------------------
-     * Public methods
-     * ----------------------------
-     */
+    Version: '3.0',
 
     // Bind to scroll
-    bind: function infscr_bind() {
+    bind: function() {
         this._binding('bind');
     },
 
     // Unbind from scroll
-    unbind: function infscr_unbind() {
+    unbind: function() {
         this._binding('unbind');
     },
 
     // Set pause value to false
-    pause: function infscr_pause() {
+    pause: function() {
         this._pausing('pause');
     },
 
     // Set pause value to false
-    resume: function infscr_resume() {
+    resume: function() {
         this._pausing('resume');
     },
 
+    // Finish the scroll
+    finish: function() {
+        this._error('end');
+    },
+
     // Toggle pause value
-    toggle: function infscr_toggle() {
+    toggle: function() {
         this._pausing();
     },
 
-    // Destroy current instance of plugin
-    destroy: function infscr_destroy() {
-        this.options.state.isDestroyed = true;
-
-        return this._error('destroy');
-    },
-
     // Retrieve next set of content items
-    retrieve: function infscr_retrieve(pageNum) {
+    retrieve: function(page) {
         var instance = this,
+            $box, $frag, url, method,
             opts = instance.options,
-            path = opts.path,
-            box, frag, desturl, method, condition,
-            pageNum = pageNum || null,
-            getPage = (!!pageNum) ? pageNum : opts.state.currPage;
+            path = opts.path, // path should be an array contains 2 elements at least, such as ['path/to/page/', ''] or ['path/to?page=', '']
+            page = page || null;
 
-        beginAjax = function infscr_ajax(opts) {
-            instance._debug('heading into ajax', path);
+        $frag = $(opts.fragSelector);
+        if (!$frag) {
+            return this._error('Can not find page fragment with `' + opts.fragSelector + '`');
+        }
 
-            // increment the URL bit. e.g. /page/3/
+        if (!$.isArray(path)) {
+            path = [path, ''];
+        }
+
+        // NOTE: this will create a global object
+        infinitescroll_ajax = function(opts) {
+            instance._debug('Heading into ajax', path);
+
+            // increment the URL bit. e.g. /page/3
             opts.state.currPage++;
 
             // if we're dealing with a table we can't use DIVs
-            box = $(opts.contentSelector).is('table') ? $('<tbody/>') : $('<div/>');
+            $box = $frag.is('table') ? $('<tbody/>') : $('<div/>');
 
-            desturl = path.join(opts.state.currPage);
+            url = path.join(page || opts.state.currPage);
 
-            method = (opts.dataType == 'html' || opts.dataType == 'json' ) ? opts.dataType : 'html+callback';
-            if (opts.appendCallback && opts.dataType == 'html') {
-                method += '+callback'
+            method = $.inArray(opts.dataType, ['json', 'html']) > -1 ? opts.dataType : 'html+callback';
+            if (opts.autoAppended && opts.dataType == 'html') {
+                method += '+callback';
             }
 
             switch (method) {
                 case 'html+callback':
-                    instance._debug('Using HTML via .load() method');
-                    box.load(desturl + ' ' + opts.itemSelector, function (responseText) {
-                        instance._loadcallback(box, responseText);
-                    });
+                    instance._debug('Using HTML via .load() method.');
 
-                break;
+                    $box.load(url + ' ' + opts.itemSelector, function (responseText) {
+                        instance._loadcallback($box, responseText);
+                    });
+                    break;
 
                 case 'html':
-                    instance._debug('Using ' + (method.toUpperCase()) + ' via $.ajax() method');
-                    $.ajax({
-                        url: desturl,
-                        dataType: opts.dataType,
-                        complete: function (jqXHR, textStatus) {
-                            condition = (typeof jqXHR.isResolved !== 'undefined') ? jqXHR.isResolved() : (textStatus === "success" || textStatus === "notmodified");
+                    instance._debug('Using HTML via $.ajax() method.');
 
-                            (condition) ? instance._loadcallback(box, jqXHR.responseText) : instance._error('end');
+                    $.ajax({
+                        url: url,
+                        dataType: 'html',
+                        complete: function (jqXHR, textStatus) {
+                            instance._isXhrSuccess(textStatus, jqXHR) ? instance._loadcallback($box, jqXHR.responseText) : instance.finish();
                         }
                     });
-
-                break;
+                    break;
 
                 case 'json':
-                    instance._debug('Using ' + (method.toUpperCase()) + ' via $.ajax() method');
+                    instance._debug('Using JSON via $.ajax() method.');
+
                     $.ajax({
-                        url: desturl,
+                        url: url,
                         type: 'GET',
                         dataType: 'json',
                         success: function(data, textStatus, jqXHR) {
-                            condition = (typeof jqXHR.isResolved !== 'undefined') ? jqXHR.isResolved() : (textStatus === "success" || textStatus === "notmodified");
-                            if(opts.appendCallback) {
-                                // if appendCallback is true, you must defined template in options.
-                                // note that data passed into _loadcallback is already an html (after processed in opts.template(data)).
-                                if(opts.template != undefined) {
-                                    var theData = opts.template(data);
-                                    box.append(theData);
+                            if(opts.autoAppended) {
+                                // if autoAppended is true, you must pass into template option.
+                                // NOTE: data passed into _loadcallback is already an html (after processed in opts.template(data)).
+                                if(typeof(opts.template) !== 'undefined') {
+                                    var html = opts.template(data);
+                                    $box.append(html);
 
-                                    (condition) ? instance._loadcallback(box, theData) : instance._error('end');
+                                    instance._isXhrSuccess(textStatus, jqXHR) ? instance._loadcallback($box, html) : instance.finish();
                                 } else {
-                                    instance._debug("template must be defined.");
-                                    instance._error('end');
+                                    instance._debug('options.template must be passed in when .autoAppended is true.');
+                                    instance.finish();
                                 }
                             } else {
-                                // if appendCallback is false, we will pass in the JSON object. you should handle it yourself in your callback.
-                                (condition) ? instance._loadcallback(box, data) : instance._error('end');
+                                // if autoAppended is false, we will pass in the JSON object. you should handle it yourself in callback.
+                                instance._isXhrSuccess(textStatus, jqXHR) ? instance._loadcallback($box, data) : instance.finish();
                             }
                         },
                         error: function(jqXHR, textStatus, errorThrown) {
-                            instance._debug("JSON ajax request failed.");
-                            instance._error('end');
+                            instance._debug('Ajax json request failed.');
+                            instance.finish();
                         }
                     });
-
-                break;
+                    break;
             }
         };
 
         // if behavior is defined and this function is extended, call that instead of default
         if (!!opts.behavior && this['retrieve_'+opts.behavior] !== undefined) {
-            this['retrieve_'+opts.behavior].call(this,pageNum);
-            return;
+            return this['retrieve_'+opts.behavior].call(this, page || opts.state.currPage++);
         }
 
         // for manual triggers, if destroyed, get out of here
         if (opts.state.isDestroyed) {
-            this._debug('Instance is destroyed');
+            this._debug('Infinistescroll object has been destroyed.');
             return false;
-        };
+        }
 
         // we dont want to fire the ajax multiple times
         opts.state.isDuringAjax = true;
 
-        opts.loading.start.call($(opts.contentSelector)[0],opts);
+        opts.loading.start.call($frag[0], opts);
     },
 
     // Check to see next page is needed
-    scroll: function infscr_scroll() {
+    scroll: function() {
         var opts = this.options,
             state = opts.state;
 
         // if behavior is defined and this function is extended, call that instead of default
         if (!!opts.behavior && this['scroll_'+opts.behavior] !== undefined) {
-            this['scroll_'+opts.behavior].call(this);
-            return;
+            return this['scroll_'+opts.behavior].call(this);
         }
 
-        if (state.isDuringAjax || state.isInvalidPage || state.isDone || state.isDestroyed || state.isPaused) return;
-
-        if (!this._nearbottom()) return;
+        if (state.isInvalidPage || state.isDuringAjax || state.isDone || state.isDestroyed || state.isPaused || !this._nearbottom()) return;
 
         this.retrieve();
     },
 
     // update options
-    update: function infscr_options(key) {
+    update: function(key, value) {
         if ($.isPlainObject(key)) {
-            this.options = $.extend(true,this.options,key);
+            if (key.path !== undefined) {
+                key.path = this._parsepath(key.path);
+            }
+
+            this.options = $.extend(true, this.options, key);
         }
+        else if (typeof(key) == 'string' && typeof(value) !== 'undefined') {
+            if (key == 'path') {
+                value = this._parsepath(value);
+            }
+
+            var opts = {};
+            opts[key] = value;
+
+            this.options = $.extend(true, this.options, opts);
+        }
+
+        return this;
     },
 
+    // reset instance
+    reset: function(key, value) {
+        this.update(key, value);
+
+        var opts = this.options;
+
+        if (opts.state.isInvalidPage) {
+            return;
+        }
+
+        this.options = $.extend(true, opts, {
+            state: {
+                isDuringAjax: false,
+                isPaused: false,
+                isDone: false, // For when it goes all the way through the archive.
+                isDestroyed: false,
+                currPage: 1
+            },
+            distancePx: undefined
+        });
+
+        opts.loading.msg
+        .find('img')
+        .show()
+        .parent()
+        .find('div').html(opts.loading.msgText);
+
+        this._binding('bind');
+
+        return this;
+    },
+
+    enable: function() {
+        this.options = $.extend(true, this.options, {
+            state: {
+                isDuringAjax: false,
+                isPaused: false,
+                isDone: false
+            }
+        });
+
+        this._binding('bind');
+
+        return this;
+    },
+
+    disable: function() {
+        this.options = $.extend(true, this.options, {
+            state: {
+                isDuringAjax: false,
+                isPaused: false,
+                isDone: true
+            }
+        });
+
+        this._binding('unbind');
+
+        return this;
+    },
+
+    // Destroy current instance of plugin
+    destroy: function() {
+        this.options.state.isDestroyed = true;
+
+        this._error('destroy');
+
+        return this;
+    },
 
     /*
      * ----------------------------
@@ -237,325 +324,316 @@ $.infinitescroll.prototype = {
      */
 
     // Fundamental aspects of the plugin are initialized
-    _create: function infscr_create(options, callback) {
+    _create: function(options, callback) {
         // Add custom options to defaults
         var opts = $.extend(true, {}, $.infinitescroll.defaults, options);
 
-        // Validate selectors
-        if (!this._validate(options)) {
-            this._debug('Options is invalid')
-            return false;
+        if ($.isFunction(opts.beforeCreate)) {
+            opts.beforeCreate.apply(this, opts);
+        }
+
+        // Validate selectors if forceCreate is false
+        if (!this._checkSelectors(options)) {
+            this._debug('Some of selectors is invalid.');
+            if (!opts.forceCreate) {
+                return false;
+            }
         }
 
         this.options = opts;
 
-        // Validate page fragment path
-        var path = $(opts.nextSelector).attr('href');
-        if (!path) {
-            this._debug('Navigation selector not found');
-            return false;
+        if (opts.path) {
+            opts.path = this._parsepath(opts.path);
+        } else {
+            // Validate page fragment path
+            var path = $(opts.nextSelector).attr('href');
+            if (path) {
+                // Set the path to be a relative URL from root.
+                opts.path = this._parsepath(path);
+            } else {
+                path = this.element.data('infinitescroll-path');
+                if (path) {
+                    opts.path = this._parsepath(path);
+                } else {
+                    this._debug('None element found with .nextSelector value.');
+                    if (opts.forceCreate) {
+                        throw 'Can not determine path option.';
+                    } else {
+                        return false;
+                    }
+                }
+            }
         }
 
-        // Set the path to be a relative URL from root.
-        opts.path = this._determinepath(path);
+        // fragSelector is 'page fragment' option for .load() / .ajax() calls
+        opts.fragSelector = opts.fragSelector || this.element;
 
-        // contentSelector is 'page fragment' option for .load() / .ajax() calls
-        opts.contentSelector = opts.contentSelector || this.element;
+        // distance from nav links to bottom
+        // computed as: height of the document + top offset of container - top offset of nav link
+        opts.distancePx = $(document).height();
+        $nav = $(opts.navSelector);
+        if ($nav.size() > 0) {
+            opts.distancePx -= $nav.offset().top;
+        }
 
-        // loading.selector - if we want to place the load message in a specific selector, defaulted to the contentSelector
-        opts.loading.selector = opts.loading.selector || opts.contentSelector;
+        // loading.selector - if we want to place the load message in a specific selector, defaulted to the fragSelector
+        opts.loading.selector = opts.loading.selector || opts.fragSelector;
 
         // Define loading.msg
         opts.loading.msg = opts.loading.msg || $('<div id="'+opts.loading.wrapperId+'">').html('<img alt="Loading..." src="' + opts.loading.img + '" /><div>' + opts.loading.msgText + '</div>');
 
-        // Preload loading.img
-        (new Image()).src = opts.loading.img;
-
-        // distance from nav links to bottom
-        // computed as: height of the document + top offset of container - top offset of nav link
-        opts.pixelsFromNavToBottom = $(document).height() - $(opts.navSelector).offset().top;
-
         // determine loading.start actions
-        opts.loading.start = opts.loading.start || function() {
-            // hide default pagination element
-            $(opts.navSelector).hide();
-
-            opts.loading.msg
-            .appendTo(opts.loading.selector)
-            .show(opts.loading.speed, function () {
-                beginAjax(opts);
-            });
-        };
+        if (!opts.loading.start) {
+            opts.loading.start = function() {
+                opts.loading.msg
+                .appendTo(opts.loading.selector)
+                .show(opts.loading.speed, function () {
+                    infinitescroll_ajax(opts);
+                });
+            };
+        }
 
         // determine loading.finished actions
-        opts.loading.finished = opts.loading.finished || function() {
-            opts.loading.msg.fadeOut('normal');
-        };
+        if (!opts.loading.finished) {
+            opts.loading.finished = function() {
+                opts.loading.msg.fadeOut(opts.loading.speed);
+            };
+        }
 
         // callback loading
         opts.callback = function(instance, data) {
             if (!!opts.behavior && instance['_callback_'+opts.behavior] !== undefined) {
-                instance['_callback_'+opts.behavior].call($(opts.contentSelector)[0], data);
+                instance['_callback_'+opts.behavior].call($(opts.fragSelector)[0], data);
             }
 
             if (callback) {
-                callback.call($(opts.contentSelector)[0], data, opts);
+                callback.call($(opts.fragSelector)[0], data, opts);
             }
         };
 
         this._setup();
 
+        // Preload loading.img
+        (new Image()).src = opts.loading.img;
+
         // Return true to indicate successful creation
         return true;
     },
 
+    // Behavior is determined
+    // If the behavior option is undefined, it will set to default and bind to scroll
+    _setup: function() {
+        var opts = this.options;
+
+        // if behavior is defined and this function is extended, call that instead of default
+        if (!!opts.behavior && this['_setup_'+opts.behavior] !== undefined) {
+            return this['_setup_'+opts.behavior].call(this);
+        }
+
+        this._binding('bind');
+
+        return true;
+    },
+
     // Bind or unbind from scroll
-    _binding: function infscr_binding(binding) {
+    _binding: function(binding) {
         var instance = this,
             opts = instance.options;
 
         // if behavior is defined and this function is extended, call that instead of default
         if (!!opts.behavior && this['_binding_'+opts.behavior] !== undefined) {
-            this['_binding_'+opts.behavior].call(this);
-            return;
+            return this['_binding_'+opts.behavior].call(this);
         }
 
+        this._debug('Binding state', binding);
+
         if (binding !== 'bind' && binding !== 'unbind') {
-            this._debug('Binding value  ' + binding + ' not valid')
+            this._debug('Binding value  ' + binding + ' is invalid.');
             return false;
         }
 
+        var bind_id = 'smartscroll.infscr.' + opts.infid;
         if (binding == 'unbind') {
-            (opts.binder).unbind('smartscroll.infscr.' + opts.infid);
+            opts.binder.unbind(bind_id);
         } else {
-            (opts.binder)[binding]('smartscroll.infscr.' + opts.infid, function () {
+            opts.binder.bind(bind_id, function(){
                 instance.scroll();
             });
-        };
-
-        this._debug('Binding', binding);
+        }
     },
 
-    // find the number to increment in the path.
-    _determinepath: function infscr_determinepath(path) {
-        var opts = this.options;
-
-        // if behavior is defined and this function is extended, call that instead of default
-        if (!!opts.behavior && this['_determinepath_'+opts.behavior] !== undefined) {
-            this['_determinepath_'+opts.behavior].call(this,path);
-            return;
-        }
-
-        if (!!opts.pathParse) {
-            this._debug('pathParse manual');
-            return opts.pathParse(path, this.options.state.currPage+1);
-        } else if (path.match(/^(.*?)\b2\b(.*?$)/)) {
-            path = path.match(/^(.*?)\b2\b(.*?$)/).slice(1);
-
-            // if there is any 2 in the url at all.
-        } else if (path.match(/^(.*?)2(.*?$)/)) {
-
-            // page= is used in django:
-            // http://www.infinite-scroll.com/changelog/comment-page-1/#comment-127
-            if (path.match(/^(.*?page=)2(\/.*|$)/)) {
-                path = path.match(/^(.*?page=)2(\/.*|$)/).slice(1);
-                return path;
-            }
-
-            path = path.match(/^(.*?)2(.*?$)/).slice(1);
-        } else {
-
-            // page= is used in drupal too but second page is page=1 not page=2:
-            // thx Jerod Fritz, vladikoff
-            if (path.match(/^(.*?page=)1(\/.*|$)/)) {
-                return path.match(/^(.*?page=)1(\/.*|$)/).slice(1);
-            } else {
-                this._debug('Sorry, we couldn\'t parse your Next (Previous Posts) URL. Verify your the css selector points to the correct A tag. If you still get this error: yell, scream, and kindly ask for help at infinite-scroll.com.');
-                // Get rid of isInvalidPage to allow permalink to state
-                opts.state.isInvalidPage = true;  //prevent it from running on this page.
-            }
-        }
-
-        this._debug('determinePath', path);
-
-        return path;
-
-    },
-
-    // Custom error
-    _error: function infscr_error(xhr) {
-        var opts = this.options;
-
-        // if behavior is defined and this function is extended, call that instead of default
-        if (!!opts.behavior && this['_error_'+opts.behavior] !== undefined) {
-            this['_error_'+opts.behavior].call(this,xhr);
-            return;
-        }
-
-        if (xhr !== 'destroy' && xhr !== 'end') {
-            xhr = 'unknown';
-        }
-
-        this._debug('Error', xhr);
-
-        if (xhr == 'end') {
-            this._showdonemsg();
-        }
-
-        opts.state.isDone = true;
-        opts.state.isPaused = false;
-        opts.state.currPage = 1; // if you need to go back to this instance
-
-        this._binding('unbind');
-    },
-
-    // Load Callback
-    _loadcallback: function infscr_loadcallback(box, data) {
-
-        var opts = this.options,
-            callback = opts.callback, // GLOBAL OBJECT FOR CALLBACK
-            result = (opts.state.isDone) ? 'done' : (!opts.appendCallback ? 'no-append' : 'append'),
-            frag;
-
-        // if behavior is defined and this function is extended, call that instead of default
-        if (!!opts.behavior && this['_loadcallback_'+opts.behavior] !== undefined) {
-            this['_loadcallback_'+opts.behavior].call(this,box,data);
-            return;
-        }
-
-        switch (result) {
-            case 'done':
-                this._showdonemsg();
-                return false;
-
-            break;
-
-            case 'no-append':
-                if (opts.dataType == 'html') {
-                    data = '<div>' + data + '</div>';
-                    data = $(data).find(opts.itemSelector);
-                }
-
-            break;
-
-            case 'append':
-                var children = box.children();
-
-                // if it didn't return anything
-                if (children.length == 0) {
-                    return this._error('end');
-                }
-
-                // use a documentFragment because it works when content is going into a table or UL
-                frag = document.createDocumentFragment();
-                while (box[0].firstChild) {
-                    frag.appendChild(box[0].firstChild);
-                }
-
-                this._debug('contentSelector', $(opts.contentSelector)[0])
-                $(opts.contentSelector)[0].appendChild(frag);
-                // previously, we would pass in the new DOM element as context for the callback
-                // however we're now using a documentfragment, which doesnt havent parents or children,
-                // so the context is the contentContainer guy, and we pass in an array
-                //   of the elements collected as the first argument.
-
-                data = children.get();
-
-            break;
-        }
-
-        // loadingEnd function
-        opts.loading.finished.call($(opts.contentSelector)[0],opts)
-
-
-        // smooth scroll to ease in the new content
-        if (opts.animate) {
-            var scrollTo = $(window).scrollTop() + $(opts.loading.wrapperId).height() + opts.extraScrollPx + 'px';
-            $('html,body').animate({ scrollTop: scrollTo }, 800, function () { opts.state.isDuringAjax = false; });
-        } else {
-            opts.state.isDuringAjax = false; // once the call is done, we can allow it again.
-        }
-
-        callback(this,data);
-
-    },
-
-    _nearbottom: function infscr_nearbottom() {
-        var opts = this.options,
-        pixelsFromWindowBottomToBottom = 0 + $(document).height() - (opts.binder.scrollTop()) - $(window).height();
-
-        // if behavior is defined and this function is extended, call that instead of default
-        if (!!opts.behavior && this['_nearbottom_'+opts.behavior] !== undefined) {
-            return this['_nearbottom_'+opts.behavior].call(this);
-        }
-
-        this._debug('math:', pixelsFromWindowBottomToBottom, opts.pixelsFromNavToBottom);
-
-        // if distance remaining in the scroll (including buffer) is less than the orignal nav to bottom....
-        return (pixelsFromWindowBottomToBottom - opts.bufferPx < opts.pixelsFromNavToBottom);
-
-    },
-
-    // Pause / temporarily disable plugin from firing
-    _pausing: function infscr_pausing(pause) {
+    // Pause/temporarily disable plugin from firing
+    _pausing: function(pause) {
         var opts = this.options;
 
         // if behavior is defined and this function is extended, call that instead of default
         if (!!opts.behavior && this['_pausing_'+opts.behavior] !== undefined) {
-            this['_pausing_'+opts.behavior].call(this,pause);
-            return;
+            return this['_pausing_'+opts.behavior].call(this,pause);
         }
+
+        this._debug('Pausing state', opts.state.isPaused);
 
         // If pause is not 'pause' or 'resume', toggle it's value
         if (pause !== 'pause' && pause !== 'resume' && pause !== null) {
             this._debug('Invalid argument. Toggling pause value instead');
-        };
+        }
 
         pause = (pause && (pause == 'pause' || pause == 'resume')) ? pause : 'toggle';
 
         switch (pause) {
             case 'pause':
                 opts.state.isPaused = true;
-            break;
+                break;
 
             case 'resume':
                 opts.state.isPaused = false;
-            break;
+                break;
 
             case 'toggle':
                 opts.state.isPaused = !opts.state.isPaused;
-            break;
+                break;
         }
 
-        this._debug('Paused', opts.state.isPaused);
-
-        return false;
+        return opts.state.isPaused;
     },
 
-    // Behavior is determined
-    // If the behavior option is undefined, it will set to default and bind to scroll
-    _setup: function infscr_setup() {
+    // Load Callback
+    _loadcallback: function($box, data) {
+        var opts = this.options,
+            callback = opts.callback,
+            result = (opts.state.isDone) ? 'done' : (!opts.autoAppended ? 'no-append' : 'append'),
+            frag;
+
+        // if behavior is defined and this function is extended, call that instead of default
+        if (!!opts.behavior && this['_loadcallback_'+opts.behavior] !== undefined) {
+            return this['_loadcallback_'+opts.behavior].call(this, $box, data);
+        }
+
+        switch (result) {
+            case 'done':
+                this._showdone();
+                return false;
+
+            case 'no-append':
+                if (opts.dataType == 'html') {
+                    data = '<div>' + data + '</div>';
+                    data = $(data).find(opts.itemSelector);
+                }
+                break;
+
+            case 'append':
+                var children = $box.children();
+
+                // if it didn't return anything
+                if (children.length === 0) {
+                    return this.finish();
+                }
+
+                // use a documentFragment because it works when content is going into a table or UL
+                frag = document.createDocumentFragment();
+                while ($box[0].firstChild) {
+                    frag.appendChild($box[0].firstChild);
+                }
+
+                $(opts.fragSelector)[0].appendChild(frag);
+                // previously, we would pass in the new DOM element as context for the callback
+                // however we're now using a documentfragment, which doesnt havent parents or children,
+                // so the context is the contentContainer guy, and we pass in an array
+                //   of the elements collected as the first argument.
+
+                data = children.get();
+                break;
+        }
+
+        // loadingEnd function
+        opts.loading.finished.call($(opts.fragSelector)[0], opts);
+
+
+        // smooth scroll to ease in the new content
+        if (opts.animate) {
+            var scrollTo = $(window).scrollTop() + $(opts.loading.wrapperId).height() + opts.extraScrollPx + 'px';
+            $('html,body').animate({ scrollTop: scrollTo }, 800, function () {
+                opts.state.isDuringAjax = false;
+            });
+        } else {
+            opts.state.isDuringAjax = false; // once the call is done, we can allow it again.
+        }
+
+        callback(this, data);
+    },
+
+    // find the number to increment in the path.
+    _parsepath: function(path) {
+        console.log(path);
         var opts = this.options;
 
         // if behavior is defined and this function is extended, call that instead of default
-        if (!!opts.behavior && this['_setup_'+opts.behavior] !== undefined) {
-            this['_setup_'+opts.behavior].call(this);
-            return;
+        if (!!opts.behavior && this['_parsepath_'+opts.behavior] !== undefined) {
+            return this['_parsepath_'+opts.behavior].call(this,path);
         }
 
-        this._binding('bind');
+        this._debug('Determine root path', path);
 
-        return false;
+        if (!!opts.pathParser) {
+            path = opts.pathParser(path, this.options.state.currPage+1);
+        }
+        // /path/to?k1=v1&page=1
+        // /path/to?page=1&k2=v2
+        else if (path.match(/^(.*?[?&]page=)\d(.*?$)/)) {
+            path = path.match(/^(.*?[?&]page=)\d(.*?$)/).slice(1);
+        }
+        // /path/to/page/1
+        // /path/to/page/1?k1=v2
+        else if (path.match(/^(.*?\/page\/)\d(.*?$)/)) {
+            path = path.match(/^(.*?\/page\/)\d(.*?$)/).slice(1);
+        } else {
+            this._debug('Sorry, we couldn\'t parse your Next (Previous Posts) URL. Verify your the css selector points to the correct A tag. If you still get this error: yell, scream, and kindly ask for help at infinite-scroll.com.');
+            // Get rid of isInvalidPage to allow permalink to state
+            opts.state.isInvalidPage = true;  //prevent it from running on this page.
+        }
+
+        return path;
+    },
+
+    _nearbottom: function() {
+        var opts = this.options,
+            bottomPx = 0 + $(document).height() - (opts.binder.scrollTop()) - $(window).height();
+
+        // if behavior is defined and this function is extended, call that instead of default
+        if (!!opts.behavior && this['_nearbottom_'+opts.behavior] !== undefined) {
+            return this['_nearbottom_'+opts.behavior].call(this);
+        }
+
+        this._debug('Calc page scroll', opts.distancePx, bottomPx, opts.bufferPx);
+
+        // if distance remaining in the scroll (including buffer) is less than the orignal nav to bottom....
+        return (bottomPx - opts.bufferPx < opts.distancePx);
+    },
+
+    // grab each paging selector option and see if any fail
+    _checkSelectors: function(opts) {
+        var selectors = ['navSelector', 'nextSelector'],
+            key, val,
+            i, j;
+        for (i = 0, j = selectors.length; i < j; i++) {
+          key = selectors[i];
+          val = opts[key];
+          if (typeof(val) === 'undefined' || $(val).length === 0) {
+            this._debug('Paging option `' + key + '` found no element.');
+            return false;
+          }
+        }
+
+        return true;
     },
 
     // Show done message
-    _showdonemsg: function infscr_showdonemsg() {
+    _showdone: function() {
         var opts = this.options;
 
         // if behavior is defined and this function is extended, call that instead of default
-        if (!!opts.behavior && this['_showdonemsg_'+opts.behavior] !== undefined) {
-            this['_showdonemsg_'+opts.behavior].call(this);
-            return;
+        if (!!opts.behavior && this['_showdone_'+opts.behavior] !== undefined) {
+            return this['_showdone_'+opts.behavior].call(this);
         }
 
         opts.loading.msg
@@ -563,33 +641,47 @@ $.infinitescroll.prototype = {
         .hide()
         .parent()
         .find('div').html(opts.loading.finishedMsg).animate({ opacity: 1 }, 2000, function () {
-            $(this).parent().fadeOut('normal');
+            $(this).parent().fadeOut(opts.loading.speed);
         });
 
         // user provided callback when done
-        opts.errorCallback.call($(opts.contentSelector)[0],'done');
+        opts.errorCallback.call($(opts.fragSelector)[0],'done');
     },
 
-    // grab each selector option and see if any fail
-    _validate: function infscr_validate(opts) {
-        for (var key in opts) {
-            if (key.indexOf && key.indexOf('Selector') > -1 && $(opts[key]).length === 0) {
-                this._debug('Your ' + key + ' found no elements.');
-                return false;
-            }
+    // Custom error
+    _error: function(xhr) {
+        var opts = this.options;
+
+        // if behavior is defined and this function is extended, call that instead of default
+        if (!!opts.behavior && this['_error_'+opts.behavior] !== undefined) {
+            return this['_error_'+opts.behavior].call(this,xhr);
         }
 
-        return true;
+        this._debug('Error', xhr);
+
+        if (xhr !== 'destroy' && xhr !== 'end') {
+            xhr = 'unknown';
+        }
+
+        if (xhr == 'end') {
+            this._showdone();
+        }
+
+        this.disable();
+    },
+
+    _isXhrSuccess: function(status, jqXHR) {
+        return (typeof(jqXHR.isResolved) !== 'undefined') ? jqXHR.isResolved() : (status === 'success' || status === 'notmodified');
     },
 
     // Console log wrapper
-    _debug: function infscr_debug() {
-        if (this.options && this.options.debug) {
-            window.console && console.log.call(console, arguments);
+    _debug: function() {
+        if (window.console && this.options && this.options.debug) {
+            console.log.call(console, arguments);
         }
     }
 
-}
+};
 
 
 /*
@@ -608,31 +700,26 @@ $.infinitescroll.prototype = {
  *  - https://github.com/desandro/masonry/blob/master/jquery.masonry.js
  */
 
-$.fn.infinitescroll = function infscr_init(options, callback) {
+$.fn.infinitescroll = function(options, callback) {
     var thisCall = typeof options;
 
     switch (thisCall) {
-        case 'string':  // method
+        case 'string':  // method call
             var args = Array.prototype.slice.call(arguments, 1);
 
             this.each(function () {
                 var instance = $.data(this, 'infinitescroll');
-                if (!instance) {
-                    // not setup yet
-                    // return $.error('Method ' + options + ' cannot be called until Infinite Scroll is setup');
+                if (!instance) { // not setup yet
                     return false;
                 }
 
-                if (!$.isFunction(instance[options]) || options.charAt(0) === "_") {
-                    // return $.error('No such method ' + options + ' for Infinite Scroll');
+                if (!$.isFunction(instance[options]) || options.charAt(0) === '_') {
                     return false;
                 }
 
-                // no errors!
                 instance[options].apply(instance, args);
             });
-
-        break;
+            break;
 
         case 'object':  // creation
             this.each(function () {
@@ -651,8 +738,7 @@ $.fn.infinitescroll = function infscr_init(options, callback) {
                     }
                 }
             });
-
-        break;
+            break;
     }
 
     return this;
